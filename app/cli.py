@@ -4,8 +4,8 @@ from app.utils import load_yaml
 from app.collect import run_collect
 from app.train_sft import run_train_sft
 from app.train_kd import run_train_kd
-from eval_bench import run_eval_bench
-from eval_similarity import run_eval_similarity
+from app.eval.eval_bench import run_eval_bench
+from app.eval.eval_similarity import run_eval_similarity
 
 app = typer.Typer(help="distillation_with_vllm CLI")
 
@@ -111,3 +111,28 @@ def pipeline(
         run_eval_similarity(teacher_path=teacher_model_path, student_path=kd_model_path)
 
     print("--- Pipeline Finished ---")
+
+
+@app.command()
+def eval_bench(
+    model_path: Annotated[str, typer.Option(help="Path to the model to evaluate")],
+    tasks: Annotated[str, typer.Option(help="Comma-separated list of tasks to evaluate on")] = "piqa,hellaswag",
+):
+    """
+    Run benchmark evaluation
+    """
+    print(f"Running benchmark evaluation for model: {model_path}")
+    run_eval_bench(model_path=model_path, tasks=tasks)
+
+
+@app.command()
+def eval_similarity(
+    teacher_path: Annotated[str, typer.Option(help="Path to the teacher model")],
+    student_path: Annotated[str, typer.Option(help="Path to the student model")],
+    sample: Annotated[int, typer.Option(help="Number of samples to evaluate on")] = 500,
+):
+    """
+    Run semantic similarity evaluation
+    """
+    print(f"Running semantic similarity evaluation between {teacher_path} and {student_path}")
+    run_eval_similarity(teacher_path=teacher_path, student_path=student_path, sample=sample)
