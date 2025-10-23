@@ -2,6 +2,7 @@ import json, math, torch
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 from torch.utils.data import Dataset
+import torch.nn.functional as F
 from transformers import (
     AutoTokenizer, AutoModelForCausalLM,
     Trainer, TrainingArguments
@@ -56,7 +57,7 @@ class KDJSONLDataset(Dataset):
       "logprobs": [              # vLLM top-k per-token (생성 토큰 길이와 동일)
          {
            "top_logprobs": [
-              {"token": "▁The", "logprob": -0.1}, {"token":"▁A", "logprob":-1.3}, ...
+              {"token": " The", "logprob": -0.1}, {"token":" A", "logprob":-1.3}, ...
            ]
          },
          ...
@@ -64,7 +65,8 @@ class KDJSONLDataset(Dataset):
     }
     """
     def __init__(self, path: str, tokenizer, max_len: int):
-        self.rows = [json.loads(l) for l in open(path, "r", encoding="utf-8")]
+        with open(path, "r", encoding="utf-8") as f:
+            self.rows = [json.loads(line.strip()) for line in f if line.strip()]
         self.tok = tokenizer
         self.max_len = max_len
 
@@ -78,146 +80,51 @@ class KDJSONLDataset(Dataset):
         enc = self.tok(
             text, truncation=True, max_length=self.max_len, return_tensors="pt"
         )
+        return {"input_ids": enc["input_ids"][0], "labels": enc["input_ids"][0]}
 
-        # --- 생성 구간 마스크 ---
-        # 간단 근사: student 토크나이저로 다시 디코딩해서 prompt 길이 추정
-        # 보다 정확히 하려면 prompt만 tokenize해서 길이를 써도 됨.
-        enc_prompt = self.tok(prompt + "\n", add_special_tokens=False, return_tensors="pt")
-        prompt_len = min(enc_prompt["input_ids"].size(1), enc["input_ids"].size(1))
-        seq_len = enc["input_ids"].size(1)
-        gen_mask = torch.zeros(seq_len, dtype=torch.bool)
-        gen_mask[prompt_len:] = True  # prompt 이후만 생성 구간으로 간주
 
-        # --- teacher sparse top-k 분포 (길이 정렬) ---
-        # vLLM의 logprobs 길이 = teacher 생성 토큰 길이
-        # student 토큰 경계와 다를 수 있으므로 "최소 길이"만큼만 KL 계산
-        teacher_lp = ex.get("logprobs", None)
-        if isinstance(teacher_lp, list):
-            teacher_k = []
-            for step in teacher_lp:
-                top = step.get("top_logprobs") or step.get("top") or []
-                teacher_k.append(top)
-        else:
-            teacher_k = None
-
-        return {
-            "input_ids": enc["input_ids"][0],
-            "attention_mask": enc["attention_mask"][0],
-            "gen_mask": gen_mask,
-            "teacher_topk": teacher_k,  # List[List[{token, logprob}]] or None
-        }
-
-@dataclass
-class CollateOut:
-    input_ids: torch.Tensor
-    attention_mask: torch.Tensor
-    labels: torch.Tensor
-    gen_mask: torch.Tensor
-    teacher_topk: List[Optional[List[List[Dict[str, Any]]]]]
-
-class Collator:
-    def __init__(self, tok): self.tok = tok
-    def __call__(self, batch) -> CollateOut:
-        pad = self.tok.pad_token_id or self.tok.eos_token_id
-        ids = [b["input_ids"] for b in batch]
-        att = [b["attention_mask"] for b in batch]
-        gen = [b["gen_mask"] for b in batch]
-        max_len = max(x.size(0) for x in ids)
-
-        ids = torch.nn.utils.rnn.pad_sequence(ids, batch_first=True, padding_value=pad)
-        att = torch.nn.utils.rnn.pad_sequence(att, batch_first=True, padding_value=0)
-        gen = torch.nn.utils.rnn.pad_sequence(gen, batch_first=True, padding_value=0)
-
-        labels = ids.clone()  # LM 표준: 입력 전체를 레이블로 (shift는 모델 내부)
-        return CollateOut(
-            input_ids=ids, attention_mask=att, labels=labels,
-            gen_mask=gen, teacher_topk=[b["teacher_topk"] for b in batch]
-        )
-
-# --------- KL(KD) 계산 ----------
-def kd_sparse_topk_kl(
-    student_logits: torch.Tensor,  # [B, L, V]
-    teacher_topk_batch: List[Optional[List[List[Dict[str, Any]]]]],
-    gen_mask: torch.Tensor,        # [B, L] (생성 구간만 True)
-    tokenizer,
-    temperature: float = 1.0,
-    eps: float = 1e-8,
-) -> torch.Tensor:
-    """
-    teacher_topk_batch[b] = None 또는 길이 T의 리스트(각 step당 top_k 엔트리 리스트)
-    KL은 (teacher 생성토큰 길이)와 (student 시퀀스 길이) 중 최소 길이만 계산.
-    """
-    B, L, V = student_logits.shape
-    # 온도 스케일
-    if temperature != 1.0:
-        student_logits = student_logits / temperature
-
-    log_softmax = torch.nn.functional.log_softmax(student_logits, dim=-1)
-    total = student_logits.new_tensor(0.0)
-    count = 0
-
-    for b in range(B):
-        topk_steps = teacher_topk_batch[b]
-        if not topk_steps:
-            continue
-
-        # student 쪽에서 생성영역 인덱스만 취득
-        gen_indices = torch.nonzero(gen_mask[b], as_tuple=False).squeeze(-1).tolist()
-        # teacher 생성 스텝 길이
-        Tt = len(topk_steps)
-        # KL 계산 길이는 두 쪽의 최소 길이
-        T = min(Tt, len(gen_indices))
-        if T <= 0:
-            continue
-
-        for t in range(T):
-            step_entries = topk_steps[t] or []
-            ids, probs = _teacher_dist_to_student_ids(step_entries, tokenizer)
-            if not ids:
-                continue
-
-            # student 분포에서 해당 ids만 샘플링
-            idx = gen_indices[t]
-            s_logp = log_softmax[b, idx, ids]   # [k]
-            t_p = student_logits.new_tensor(probs)  # [k], 합=1
-
-            # KL(P_t || P_s) = sum_i p_t(i) * (log p_t(i) - log p_s(i))
-            t_logp = torch.log(t_p + eps)
-            kl = torch.sum(t_p * (t_logp - s_logp))
-            total = total + kl
-            count += 1
-
-    if count == 0:
-        return student_logits.new_tensor(0.0)
-    return total / count
+def collate(batch):
+    import torch
+    keys = batch[0].keys()
+    out = {k: torch.stack([torch.tensor(x[k]) for x in batch]) for k in keys}
+    out["labels"] = out["labels"].long()
+    return out
 
 # --------- KD Trainer ----------
 class KDTrainer(Trainer):
-    def __init__(self, *args, alpha_kd: float = 0.1, temperature: float = 1.0, tokenizer=None, **kwargs):
+    def __init__(self, *args, teacher_model=None, kd_alpha=0.5, kd_temp=1.0, **kwargs):
         super().__init__(*args, **kwargs)
-        self.alpha_kd = alpha_kd
-        self.temperature = temperature
-        self.tokenizer = tokenizer
+        assert teacher_model is not None
+        self.teacher = teacher_model.eval()
+        for p in self.teacher.parameters():
+            p.requires_grad = False
+        self.kd_alpha, self.kd_temp = kd_alpha, kd_temp
 
     def compute_loss(self, model, inputs, return_outputs=False):
-        # inputs: CollateOut(dict로 들어옴)
-        teacher_topk = inputs.pop("teacher_topk")
-        gen_mask = inputs.pop("gen_mask")
+        labels = inputs.get("labels")
+        if not torch.is_tensor(labels):
+            raise TypeError("'labels' must be a torch.Tensor")
 
-        outputs = model(**inputs)
-        ce_loss = outputs.loss
+        outputs_s = model(**inputs)
+        logits_s = outputs_s.logits
 
-        # KD KL
         with torch.no_grad():
-            # forward에서 이미 logits 계산됨. (outputs.logits: [B,L,V])
-            pass
+            outputs_t = self.teacher(**{k: v for k, v in inputs.items() if k != "labels"})
+            logits_t = outputs_t.logits
 
-        kd = kd_sparse_topk_kl(
-            outputs.logits, teacher_topk, gen_mask,
-            tokenizer=self.tokenizer, temperature=self.temperature
+        ce_loss = F.cross_entropy(
+            logits_s.view(-1, logits_s.size(-1)), labels.view(-1), ignore_index=-100
         )
-        loss = ce_loss + self.alpha_kd * kd
-        return (loss, outputs) if return_outputs else loss
+        t = self.kd_temp
+        kd_loss = F.kl_div(
+            F.log_softmax(logits_s / t, dim=-1),
+            F.softmax(logits_t / t, dim=-1),
+            reduction="batchmean",
+        ) * (t**2)
+
+        loss = self.kd_alpha * kd_loss + (1 - self.kd_alpha) * ce_loss
+        return (loss, outputs_s) if return_outputs else loss
+
 
 # --------- 엔트리 ----------
 def run_train_kd(cfg: Dict[str, Any]):
@@ -226,8 +133,13 @@ def run_train_kd(cfg: Dict[str, Any]):
 
     ds = KDJSONLDataset(cfg["data_path"], tok, cfg["max_len"])
 
-    model = AutoModelForCausalLM.from_pretrained(
+    student_model = AutoModelForCausalLM.from_pretrained(
         cfg["student_model"], torch_dtype=torch.bfloat16,
+        low_cpu_mem_usage=True, device_map="auto"
+    )
+
+    teacher_model = AutoModelForCausalLM.from_pretrained(
+        cfg["teacher_model"], torch_dtype=torch.bfloat16,
         low_cpu_mem_usage=True, device_map="auto"
     )
 
@@ -239,19 +151,23 @@ def run_train_kd(cfg: Dict[str, Any]):
         learning_rate=cfg["lr"],
         lr_scheduler_type=cfg["scheduler"],
         warmup_ratio=cfg["warmup"],
-        bf16=True,
+        bf16=cfg.get("bf16", True),
         logging_steps=cfg["logging_steps"],
-        save_steps=cfg["save_steps"],
-        save_total_limit=2,
+        save_strategy="no",
+        remove_unused_columns=False,
+        report_to=[],
+        no_cuda=True,
     )
 
     trainer = KDTrainer(
-        model=model, args=args, train_dataset=ds,
-        data_collator=Collator(tok),
-        alpha_kd=cfg.get("alpha_kd", 0.1),
-        temperature=cfg.get("temperature", 1.0),
-        tokenizer=tok
+        model=student_model,
+        teacher_model=teacher_model,
+        args=args,
+        train_dataset=ds,
+        data_collator=collate,
+        kd_alpha=cfg.get("kd_alpha", 0.5),
+        kd_temp=cfg.get("kd_temp", 1.0),
     )
     trainer.train()
-    model.save_pretrained(cfg["final_dir"])
+    trainer.save_model(cfg["final_dir"])
     tok.save_pretrained(cfg["final_dir"])

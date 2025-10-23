@@ -1,3 +1,4 @@
+import json
 from datasets import load_dataset
 from typing import List, Dict, Any
 from app.hosting import VLLMEngine
@@ -44,7 +45,7 @@ def run_collect(cfg: Dict[str, Any]) -> str:
     out_path = cfg["output"]["path"]
     with jsonl_writer(out_path) as f:
         for r in results:
-            f.write(orjson.dumps(r))
+            f.write(json.dumps(r).encode("utf-8"))
             f.write(b"\n")
     log(f"[collect] saved -> {out_path}")
     return out_path
