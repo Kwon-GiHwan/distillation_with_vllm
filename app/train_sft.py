@@ -5,7 +5,8 @@ from transformers import (AutoTokenizer, AutoModelForCausalLM,
 
 class JSONLDistill(Dataset):
     def __init__(self, path: str, tok, max_len: int):
-        self.rows = [json.loads(l) for l in open(path, "r", encoding="utf-8")]
+        with open(path, "r", encoding="utf-8") as f:
+            self.rows = [json.loads(line.strip()) for line in f if line.strip()]
         self.tok = tok
         self.max_len = max_len
 
@@ -46,15 +47,17 @@ def run_train_sft(cfg):
         learning_rate=cfg["lr"],
         lr_scheduler_type=cfg["scheduler"],
         warmup_ratio=cfg["warmup"],
-        bf16=True,
+        bf16=cfg.get("bf16", True),
         logging_steps=cfg["logging_steps"],
-        save_steps=cfg["save_steps"],
-        save_total_limit=2,
+        save_strategy="no",
+        remove_unused_columns=False,
+        report_to=[],
+        no_cuda=True,
     )
 
     trainer = Trainer(
         model=model, args=args, train_dataset=ds, data_collator=Collator(tok)
     )
     trainer.train()
-    model.save_pretrained(cfg["final_dir"])
+    trainer.save_model(cfg["final_dir"])
     tok.save_pretrained(cfg["final_dir"])
