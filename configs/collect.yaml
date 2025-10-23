@@ -1,0 +1,18 @@
+dataset:
+  name: alpaca            # (추가: flan 등으로 확장 예정)
+  n_samples: 20000
+
+hosting:
+  model: "meta-llama/Llama-3.2-3B-Instruct"
+  dtype: "auto"
+  quantization: "bitsandbytes"   # RTX 4060에서 안전
+  gpu_memory_utilization: 0.90
+
+sampling:
+  temperature: 0.7
+  top_p: 0.9
+  max_tokens: 512
+  logprobs: 5
+
+output:
+  path: "data/distilled/alpaca_llama32_3b.jsonl"
