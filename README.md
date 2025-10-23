@@ -66,33 +66,33 @@ batch size, epochs, learning rate
 Step 1: Collect teacher data
 bash
 코드 복사
-python main.py collect
+python -m main collect
 Runs the teacher model via vLLM, generates instruction–response pairs,
 and saves results (including logprobs) into data/distilled/.
 
 Step 2: Supervised Fine-tuning (SFT)
 bash
 코드 복사
-python main.py train_sft
+python -m main train_sft
 Trains the student model on teacher outputs using hard labels (CrossEntropy).
 
 Step 3: Knowledge Distillation (KD)
 bash
 코드 복사
-python main.py train_kd
+python -m main train_kd
 Refines the student by matching teacher’s token-level probability distributions (KL loss).
 
 🧪 Evaluation
 1. Benchmark Accuracy
 bash
 코드 복사
-python eval_bench.py --model artifacts/qwen05b_kd/final --tasks piqa,hellaswag
+python -m main eval_bench --model-path artifacts/qwen05b_kd/final --tasks piqa,hellaswag
 2. Teacher–Student Semantic Similarity
 bash
 코드 복사
-python eval_similarity.py \
-  --teacher meta-llama/Llama-3.2-3B-Instruct \
-  --student artifacts/qwen05b_kd/final \
+python -m main eval_similarity \
+  --teacher-path meta-llama/Llama-3.2-3B-Instruct \
+  --student-path artifacts/qwen05b_kd/final \
   --sample 500
 📈 Expected Results
 Metric	Description	Target
@@ -140,15 +140,15 @@ Your job is to ensure that python main.py commands run successfully for all stag
 bash
 코드 복사
 # 1. Teacher generation
-python main.py collect
+python -m main collect
 
 # 2. Student SFT
-python main.py train_sft
+python -m main train_sft
 
 # 3. Knowledge Distillation
-python main.py train_kd
+python -m main train_kd
 
 # 4. Evaluation
-python eval_bench.py --model artifacts/qwen05b_kd/final --tasks piqa,hellaswag
-python eval_similarity.py --teacher meta-llama/Llama-3.2-3B-Instruct --student artifacts/qwen05b_kd/final --sample 500
+python -m main eval_bench --model-path artifacts/qwen05b_kd/final --tasks piqa,hellaswag
+python -m main eval_similarity --teacher-path meta-llama/Llama-3.2-3B-Instruct --student-path artifacts/qwen05b_kd/final --sample 500
 🧾
