@@ -1,0 +1,51 @@
+seed: 42
+
+
+# 데이터셋 설정
+dataset:
+name: glue
+subset: sst2
+text_col: sentence
+label_col: label
+max_length: 128
+
+
+# Teacher (vLLM) 설정
+teacher:
+api_base: "http://localhost:8000/v1" # vLLM OpenAI 호환 엔드포인트
+api_key: "dummy" # vLLM은 키 검사 안 함
+model: "Qwen/Qwen2.5-1.5B-Instruct"
+temperature: 2.0 # KD 소프트 타깃 온도
+verbalizers:
+positive: ["positive", " Positive", "POSITIVE"]
+negative: ["negative", " Negative", "NEGATIVE"]
+system_prompt: >
+You are a concise sentiment classifier. Classify the user's sentence as exactly one word: positive or negative. Answer with a single word only: positive or negative.
+
+
+# Student 설정
+student:
+model_id: "prajjwal1/bert-tiny"
+
+
+# 학습 설정 (SFT/KD 공통)
+train:
+output_dir_sft: "out_sft"
+output_dir_kd: "out_kd"
+lr: 5e-4
+epochs: 3
+weight_decay: 0.01
+bsz_train: 64
+bsz_eval: 128
+logging_steps: 50
+
+
+# KD 손실 가중치
+kd:
+alpha: 0.5 # CE 가중치
+temperature: 2.0 # KL 온도(teacher에도 동일 적용을 권장)
+
+
+# 캐시 경로
+cache:
+kd_dataset: "cache/kd_sst2_with_teacher_vllm"
