@@ -69,7 +69,7 @@ class TeacherClientVLLM:
             neg_p, pos_p = self._softmax_from_logprobs(label_lp, self.cfg.teacher.temperature)
             logits.append([math.log(max(neg_p, 1e-40)), math.log(max(pos_p, 1e-40))])
             time.sleep(0.005)
-            return logits
+        return logits
 
 
     def collect(self) -> str:
