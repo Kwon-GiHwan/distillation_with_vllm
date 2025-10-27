@@ -6,6 +6,11 @@ from typing import Dict
 from src.config import Cfg
 from src.data import DatasetManager
 
+from packaging import version
+import transformers
+
+
+
 
 class KDTrainer(Trainer):
     def __init__(self, *args, kd_alpha: float = 0.5, kd_temperature: float = 2.0, **kwargs):
@@ -66,7 +71,7 @@ class TrainerEngine:
 
         args = TrainingArguments(
             output_dir=out_dir,
-            evaluation_strategy="epoch",
+            eval_strategy="epoch",
             save_strategy="epoch",
             learning_rate=self.cfg.train.lr,
             per_device_train_batch_size=self.cfg.train.bsz_train,
